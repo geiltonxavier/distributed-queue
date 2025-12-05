@@ -17,7 +17,6 @@ coverage.txt
 
 # Mac
 .DS_Store
-README.md
 
 # Local Go build cache (used in tests to avoid permission issues)
 .cache/
