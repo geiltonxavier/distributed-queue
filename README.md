@@ -6,32 +6,40 @@ Estudo sobre filas e workers concorrentes em Go. Mantive o escopo simples, mas c
 
 ```bash
 GOCACHE=$(pwd)/.cache/go-build go test ./...
-WORKERS=3 TASKS=10 go run ./cmd/demo
+WORKERS=3 TASKS=10 MAX_ATTEMPTS=3 go run ./cmd/demo
 ```
 
 Flags via env:
 - `WORKERS`: número de workers (default 3)
 - `TASKS`: quantidade de tarefas publicadas (default 10)
+- `MAX_ATTEMPTS`: tentativas totais antes de enviar para a DLQ (default 3)
 
-Saída esperada: enfileiramentos e workers processando com tempos simulados. Ctrl+C encerra.
+Saída esperada: enfileiramentos e workers processando com tempos simulados (com algumas falhas aleatórias e retentativas). Ctrl+C encerra.
+
+## Retentativas e DLQ
+
+- Handlers que retornam erro são reexecutados com backoff exponencial (base 50ms, máximo 1s).
+- Após esgotar `MAX_ATTEMPTS`, a tarefa vai para uma DLQ em memória (`queue.InMemoryDLQ`), logada ao final da demo.
+- O pool aceita configuração de backoff e tentativas via opções (`WithMaxAttempts`, `WithBackoff`, `WithDLQ`).
 
 ## Arquitetura atual
 
 - **task** (`internal/task`): modelo de tarefa com ID, tipo, payload e timestamp.
-- **queue** (`internal/queue`): broker em memória (channel bufferizado) com `Enqueue`, `Dequeue`, `Close`, respeitando contextos.
-- **worker pool** (`internal/worker`): pool fixo consumindo do broker; Start/Stop, contexto e espera por shutdown limpo.
+- **queue** (`internal/queue`): broker em memória (channel bufferizado) com `Enqueue`, `Dequeue`, `Close`, respeitando contextos; DLQ em memória para inspeção.
+- **worker pool** (`internal/worker`): pool fixo consumindo do broker; retentativas com backoff configurável, DLQ opcional, Start/Stop, contexto e shutdown limpo.
 - **demo** (`cmd/demo`): wiring simples que instancia broker, pool, publica tarefas e loga processamento.
 
 ## Decisões e preocupações
 
 - **Cancelamento/shutdown**: uso de `context.Context` na fila e nos workers; `Stop` aguarda handlers finalizarem.
 - **Backpressure**: capacidade configurável do broker; `Enqueue` bloqueia quando cheio, respeitando contexto.
-- **Testes**: cobrem fila (cancelamento, fechamento) e pool (processamento e parada); cache local para evitar restrições de permissões.
+- **Tolerância a falhas**: retentativas com backoff exponencial padrão (50ms até 1s); DLQ simples para visualizar quedas.
+- **Testes**: cobrem fila (cancelamento, fechamento), pool (processamento, parada, retentativas e DLQ); cache local para evitar restrições de permissões.
 - **Simplicidade intencional**: usei channel para broker e handler síncrono; espaço para trocar por backends reais sem quebrar API.
 
 ## Checklist de próximos passos (estudo/aperfeiçoamento)
 
-- [ ] Retentativas com backoff e DLQ simples
+- [x] Retentativas com backoff e DLQ simples
 - [ ] Logs estruturados (campos para task_id, tentativa, duração)
 - [ ] Métricas: contadores/latências + expor /metrics (Prometheus)
 - [ ] Timeouts por tarefa e limites de concorrência por tipo
@@ -42,5 +50,4 @@ Saída esperada: enfileiramentos e workers processando com tempos simulados. Ctr
 
 ## Nota pessoal
 
-O objetivo não é entregar um produto pronto, mas mostrar disciplina de engenharia em algo pequeno: testes primeiro, shutdown bem pensado, roadmap explícito e foco em clareza. A ideia é evoluir incrementalmente com commits pequenos e mensagens descritivas.***
-# distributed-queue
+O objetivo não é entregar um produto pronto, mas mostrar disciplina de engenharia em algo pequeno: testes primeiro, shutdown bem pensado, roadmap explícito e foco em clareza. A ideia é evoluir incrementalmente com commits pequenos e mensagens descritivas.

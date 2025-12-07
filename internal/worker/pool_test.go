@@ -2,6 +2,7 @@ package worker
 
 import (
 	"context"
+	"errors"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -57,6 +58,90 @@ func TestPoolProcessesTasks(t *testing.T) {
 	defer mu.Unlock()
 	if len(seen) != 5 {
 		t.Fatalf("expected 5 unique tasks processed, got %d", len(seen))
+	}
+}
+
+func TestPoolRetriesUntilSuccess(t *testing.T) {
+	broker := queue.NewInMemoryBroker(1)
+	defer broker.Close()
+
+	var attempts atomic.Int32
+	handler := func(ctx context.Context, t task.Task) error {
+		if attempts.Add(1); attempts.Load() < 3 {
+			return errors.New("temporary error")
+		}
+		return nil
+	}
+
+	pool := NewPool(
+		broker,
+		1,
+		handler,
+		WithMaxAttempts(5),
+		WithBackoff(func(int) time.Duration { return time.Millisecond }),
+	)
+	pool.Start(context.Background())
+	defer pool.Stop()
+
+	if err := broker.Enqueue(context.Background(), task.New("1", "retry", nil)); err != nil {
+		t.Fatalf("enqueue: %v", err)
+	}
+
+	waitCtx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel()
+	for {
+		if attempts.Load() >= 3 {
+			break
+		}
+		select {
+		case <-waitCtx.Done():
+			t.Fatalf("expected retries to succeed, got only %d attempts", attempts.Load())
+		default:
+			time.Sleep(2 * time.Millisecond)
+		}
+	}
+}
+
+func TestPoolSendsToDLQAfterMaxAttempts(t *testing.T) {
+	broker := queue.NewInMemoryBroker(1)
+	defer broker.Close()
+
+	dlq := queue.NewInMemoryDLQ()
+	handler := func(ctx context.Context, t task.Task) error {
+		return errors.New("always fails")
+	}
+
+	pool := NewPool(
+		broker,
+		1,
+		handler,
+		WithMaxAttempts(2),
+		WithBackoff(func(int) time.Duration { return time.Millisecond }),
+		WithDLQ(dlq),
+	)
+	pool.Start(context.Background())
+	defer pool.Stop()
+
+	if err := broker.Enqueue(context.Background(), task.New("2", "dlq", nil)); err != nil {
+		t.Fatalf("enqueue: %v", err)
+	}
+
+	waitCtx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel()
+	for {
+		failures := dlq.Failures()
+		if len(failures) == 1 {
+			if failures[0].Attempts != 2 {
+				t.Fatalf("expected 2 attempts, got %d", failures[0].Attempts)
+			}
+			break
+		}
+		select {
+		case <-waitCtx.Done():
+			t.Fatalf("task did not reach DLQ")
+		default:
+			time.Sleep(2 * time.Millisecond)
+		}
 	}
 }
 
